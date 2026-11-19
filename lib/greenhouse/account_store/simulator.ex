@@ -1,7 +1,7 @@
 defmodule Greenhouse.AccountStore.Simulator do
   @moduledoc """
   Demo account seeding and local simulation scenarios for the sole reserved
-  simulated greenhouse device (`GH-0001`).
+  simulated greenhouse device (`GH-0000`).
   """
 
   alias Greenhouse.AccountStore.{Auth, Bindings}
@@ -12,7 +12,7 @@ defmodule Greenhouse.AccountStore.Simulator do
   @usernames_table :gh_usernames
   @bindings_table :gh_bindings
 
-  @reserved_sim_device_id "GH-0001"
+  @reserved_sim_device_id "GH-0000"
   @valid_scenarios [
     "normal",
     "hot",
@@ -48,13 +48,13 @@ defmodule Greenhouse.AccountStore.Simulator do
   }
 
   @doc """
-  Returns the sole reserved simulated device ID (`"GH-0001"`).
+  Returns the sole reserved simulated device ID (`"GH-0000"`).
   """
   @spec simulated_device_id() :: Greenhouse.device_id()
   def simulated_device_id, do: @reserved_sim_device_id
 
   @doc """
-  Returns `true` if `device_id` normalizes to `"GH-0001"`.
+  Returns `true` if `device_id` normalizes to `"GH-0000"`.
   """
   @spec simulated_device?(term()) :: boolean()
   def simulated_device?(device_id) do
@@ -82,8 +82,8 @@ defmodule Greenhouse.AccountStore.Simulator do
   end
 
   @doc """
-  Seeds the demo accounts (`alice`, `bob`), bindings (`GH-0001`, `GH-0002`), and
-  initial `GH-0001` simulated telemetry/config if missing.
+  Seeds the demo accounts (`alice`, `bob`), bindings (`GH-0000`, `GH-0002`), and
+  initial `GH-0000` simulated telemetry/config if missing.
   """
   @spec seed_demo_data!(boolean(), DETS.dets_map()) :: :ok
   def seed_demo_data!(persist?, dets_tables)
@@ -124,8 +124,8 @@ defmodule Greenhouse.AccountStore.Simulator do
     DETS.put_record(@users_table, {bob.id, bob}, persist?, dets_tables)
     :ets.insert(@usernames_table, [{"alice", alice.id}, {"bob", bob.id}])
 
-    gh1_binding = %{
-      deviceId: "GH-0001",
+    gh0_binding = %{
+      deviceId: @reserved_sim_device_id,
       userId: "user-alice",
       name: "1号智能育苗温室",
       location: "A区-东侧",
@@ -146,7 +146,7 @@ defmodule Greenhouse.AccountStore.Simulator do
       updatedAt: now_iso
     }
 
-    DETS.put_record(@bindings_table, {"GH-0001", gh1_binding}, persist?, dets_tables)
+    DETS.put_record(@bindings_table, {@reserved_sim_device_id, gh0_binding}, persist?, dets_tables)
     DETS.put_record(@bindings_table, {"GH-0002", gh2_binding}, persist?, dets_tables)
 
     if Process.whereis(Storage) != nil and
@@ -158,7 +158,7 @@ defmodule Greenhouse.AccountStore.Simulator do
   end
 
   @doc """
-  Populates 16 synthetic historical points, online status, and default config for `GH-0001`.
+  Populates 16 synthetic historical points, online status, and default config for `GH-0000`.
   """
   @spec seed_simulated_device!() :: :ok
   def seed_simulated_device! do

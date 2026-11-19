@@ -24,7 +24,7 @@ defmodule Greenhouse.AccountStoreTest do
   end
 
   describe "demo seed & single simulated device invariant" do
-    test "seeds alice and bob with dual passwords and only GH-0001 has storage data" do
+    test "seeds alice and bob with dual passwords and only GH-0000 has storage data" do
       assert {:ok, alice} = AccountStore.verify_credentials("alice", "password123")
       assert {:ok, ^alice} = AccountStore.verify_credentials("alice", "alice123")
       assert alice.id == "user-alice"
@@ -37,33 +37,34 @@ defmodule Greenhouse.AccountStoreTest do
 
       assert {:error, :invalid_credentials} = AccountStore.verify_credentials("alice", "wrong")
 
-      # Only GH-0001 is populated in Storage with Protocol v2 fields
-      assert {:ok, gh1_dev} = Storage.get_device("GH-0001")
-      assert gh1_dev.status.online == true
-      assert is_binary(gh1_dev.status.b)
-      assert Regex.match?(~r/^[0-9a-f]{8}$/, gh1_dev.status.b)
-      assert is_binary(gh1_dev.status.updated_at)
-      assert is_integer(gh1_dev.status.updated_at_ms)
-      assert gh1_dev.latest_telemetry != nil
-      assert gh1_dev.latest_telemetry.v == 2
-      assert gh1_dev.latest_telemetry.b == gh1_dev.status.b
-      assert gh1_dev.latest_telemetry.raw["b"] == gh1_dev.status.b
-      assert map_size(gh1_dev.config.raw) == 21
-      {:ok, gh1_hist} = Storage.get_telemetry_history("GH-0001", limit: 50)
-      assert gh1_hist.total == 16
-      assert Enum.all?(gh1_hist.items, &(&1.v == 2 and &1.b == gh1_dev.status.b))
+      # Only GH-0000 is populated in Storage with Protocol v2 fields
+      assert {:ok, gh0_dev} = Storage.get_device("GH-0000")
+      assert gh0_dev.status.online == true
+      assert is_binary(gh0_dev.status.b)
+      assert Regex.match?(~r/^[0-9a-f]{8}$/, gh0_dev.status.b)
+      assert is_binary(gh0_dev.status.updated_at)
+      assert is_integer(gh0_dev.status.updated_at_ms)
+      assert gh0_dev.latest_telemetry != nil
+      assert gh0_dev.latest_telemetry.v == 2
+      assert gh0_dev.latest_telemetry.b == gh0_dev.status.b
+      assert gh0_dev.latest_telemetry.raw["b"] == gh0_dev.status.b
+      assert map_size(gh0_dev.config.raw) == 21
+      {:ok, gh0_hist} = Storage.get_telemetry_history("GH-0000", limit: 50)
+      assert gh0_hist.total == 16
+      assert Enum.all?(gh0_hist.items, &(&1.v == 2 and &1.b == gh0_dev.status.b))
 
-      # GH-0002 and GH-0003 must NOT have fabricated Storage data
+      # GH-0001, GH-0002 and GH-0003 must NOT have fabricated Storage data
+      assert {:error, :not_found} = Storage.get_device("GH-0001")
       assert {:error, :not_found} = Storage.get_device("GH-0002")
       assert {:error, :not_found} = Storage.get_device("GH-0003")
 
-      [gh1_binding] = AccountStore.list_user_bindings("user-alice")
-      assert gh1_binding.deviceId == "GH-0001"
-      gh1_snap = AccountStore.build_user_device_snapshot(gh1_binding)
-      assert gh1_snap.simulated == true
-      assert gh1_snap.online == true
-      assert gh1_snap.source == "local"
-      assert gh1_snap.latest_telemetry != nil
+      [gh0_binding] = AccountStore.list_user_bindings("user-alice")
+      assert gh0_binding.deviceId == "GH-0000"
+      gh0_snap = AccountStore.build_user_device_snapshot(gh0_binding)
+      assert gh0_snap.simulated == true
+      assert gh0_snap.online == true
+      assert gh0_snap.source == "local"
+      assert gh0_snap.latest_telemetry != nil
 
       [gh2_binding] = AccountStore.list_user_bindings("user-bob")
       assert gh2_binding.deviceId == "GH-0002"
@@ -103,7 +104,7 @@ defmodule Greenhouse.AccountStoreTest do
 
       # Attempting to bind device owned by alice -> 409
       assert {:error, 409, "device_already_bound", _} =
-               AccountStore.bind_device(charlie.id, %{"deviceId" => "gh-0001"})
+               AccountStore.bind_device(charlie.id, %{"deviceId" => "gh-0000"})
 
       # Binding unknown device succeeds without fabricating storage data
       assert {:ok, binding} =
@@ -138,7 +139,10 @@ defmodule Greenhouse.AccountStoreTest do
       assert {:error, :unauthorized} = AccountStore.get_session_user(token)
     end
 
-    test "allows simulation only for GH-0001 and rejects unknown devices" do
+    test "allows simulation only for GH-0000 and rejects unknown devices" do
+      assert {:error, 400, "not_simulated_device", _} =
+               AccountStore.simulate_scenario("GH-0001", "normal")
+
       assert {:error, 400, "not_simulated_device", _} =
                AccountStore.simulate_scenario("GH-0002", "normal")
 
@@ -146,13 +150,13 @@ defmodule Greenhouse.AccountStoreTest do
                AccountStore.simulate_scenario("GH-0003", "water_lack")
 
       assert {:error, 400, "invalid_scenario", _} =
-               AccountStore.simulate_scenario("GH-0001", "unknown_mode")
+               AccountStore.simulate_scenario("GH-0000", "unknown_mode")
 
-      {:ok, initial_dev} = Storage.get_device("GH-0001")
+      {:ok, initial_dev} = Storage.get_device("GH-0000")
       initial_b = initial_dev.status.b
       initial_seq = initial_dev.latest_telemetry.seq
 
-      assert {:ok, lack_snap} = AccountStore.simulate_scenario("GH-0001", "water_lack")
+      assert {:ok, lack_snap} = AccountStore.simulate_scenario("GH-0000", "water_lack")
       assert lack_snap.active_alarm_count == 1
       alarm = hd(lack_snap.active_alarms)
       assert alarm.code == "water_lack"
@@ -163,17 +167,17 @@ defmodule Greenhouse.AccountStoreTest do
       assert lack_snap.latest_telemetry.seq == initial_seq + 1
       assert lack_snap.latest_telemetry.water == 0
 
-      assert {:ok, restored_snap} = AccountStore.simulate_scenario("GH-0001", "water_restored")
+      assert {:ok, restored_snap} = AccountStore.simulate_scenario("GH-0000", "water_restored")
       assert restored_snap.active_alarm_count == 0
       assert restored_snap.latest_telemetry.b == initial_b
       assert restored_snap.latest_telemetry.seq == initial_seq + 2
       assert restored_snap.latest_telemetry.water == 1
 
-      assert {:ok, offline_snap} = AccountStore.simulate_scenario("GH-0001", "offline")
+      assert {:ok, offline_snap} = AccountStore.simulate_scenario("GH-0000", "offline")
       assert offline_snap.online == false
 
       # Offline -> online simulates reboot with new 8-hex b and seq reset to 0
-      assert {:ok, reboot_snap} = AccountStore.simulate_scenario("GH-0001", "normal")
+      assert {:ok, reboot_snap} = AccountStore.simulate_scenario("GH-0000", "normal")
       assert reboot_snap.online == true
       assert Regex.match?(~r/^[0-9a-f]{8}$/, reboot_snap.status.b)
       assert reboot_snap.status.b != initial_b
@@ -293,9 +297,9 @@ defmodule Greenhouse.AccountStoreTest do
 
       GenServer.stop(pid)
 
-      # Ensure seed_demo: true does not crash if Storage already has higher-seq GH-0001 telemetry
+      # Ensure seed_demo: true does not crash if Storage already has higher-seq GH-0000 telemetry
       {:ok, :recorded} =
-        Greenhouse.Storage.record_telemetry_compact("GH-0001", %{
+        Greenhouse.Storage.record_telemetry_compact("GH-0000", %{
           "v" => 2,
           "b" => "7f3a91c4",
           "seq" => 99_999,

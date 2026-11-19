@@ -56,7 +56,7 @@ defmodule Greenhouse.Web.AuthAndTenantRoutesTest do
     assert me_conn.status == 200
     assert JSON.decode!(me_conn.resp_body)["data"]["user"]["id"] == "user-alice"
 
-    # Alice lists only GH-0001
+    # Alice lists only GH-0000
     list_conn =
       conn(:get, "/api/v1/user/devices")
       |> put_req_header("authorization", "Bearer #{alice_token}")
@@ -64,7 +64,7 @@ defmodule Greenhouse.Web.AuthAndTenantRoutesTest do
 
     assert list_conn.status == 200
     devices = JSON.decode!(list_conn.resp_body)["data"]
-    assert Enum.map(devices, & &1["device_id"]) == ["GH-0001"]
+    assert Enum.map(devices, & &1["device_id"]) == ["GH-0000"]
     assert hd(devices)["simulated"] == true
 
     # Alice forbidden from GH-0002
@@ -75,7 +75,7 @@ defmodule Greenhouse.Web.AuthAndTenantRoutesTest do
 
     assert forbidden_conn.status == 403
 
-    # Register new user and verify empty list + bind unknown GH-0003 + 409 on GH-0001
+    # Register new user and verify empty list + bind unknown GH-0003 + 409 on GH-0000
     reg_conn =
       Router.call(
         conn(:post, "/api/v1/auth/register", %{
@@ -88,7 +88,7 @@ defmodule Greenhouse.Web.AuthAndTenantRoutesTest do
     tester_token = JSON.decode!(reg_conn.resp_body)["data"]["token"]
 
     conflict_conn =
-      conn(:post, "/api/v1/user/devices", %{"deviceId" => "GH-0001"})
+      conn(:post, "/api/v1/user/devices", %{"deviceId" => "GH-0000"})
       |> put_req_header("authorization", "Bearer #{tester_token}")
       |> Router.call()
 
@@ -146,9 +146,9 @@ defmodule Greenhouse.Web.AuthAndTenantRoutesTest do
   end
 
   test "simulate endpoint, dev reset, and config cache_fallback=true work as expected" do
-    # Simulate GH-0001 succeeds (v2 + b + reboot rotation), GH-0002 fails 400
+    # Simulate GH-0000 succeeds (v2 + b + reboot rotation), GH-0001/GH-0002 fail 400
     sim_ok =
-      Router.call(conn(:post, "/api/v1/devices/GH-0001/simulate", %{"scenario" => "hot"}))
+      Router.call(conn(:post, "/api/v1/devices/GH-0000/simulate", %{"scenario" => "hot"}))
 
     assert sim_ok.status == 200
     sim_data = JSON.decode!(sim_ok.resp_body)["data"]
@@ -161,13 +161,13 @@ defmodule Greenhouse.Web.AuthAndTenantRoutesTest do
     assert sim_data["latest_telemetry"]["fan"] == 1
 
     sim_offline =
-      Router.call(conn(:post, "/api/v1/devices/GH-0001/simulate", %{"scenario" => "offline"}))
+      Router.call(conn(:post, "/api/v1/devices/GH-0000/simulate", %{"scenario" => "offline"}))
 
     assert sim_offline.status == 200
     assert JSON.decode!(sim_offline.resp_body)["data"]["online"] == false
 
     sim_reboot =
-      Router.call(conn(:post, "/api/v1/devices/GH-0001/simulate", %{"scenario" => "normal"}))
+      Router.call(conn(:post, "/api/v1/devices/GH-0000/simulate", %{"scenario" => "normal"}))
 
     assert sim_reboot.status == 200
     reboot_data = JSON.decode!(sim_reboot.resp_body)["data"]
@@ -175,6 +175,12 @@ defmodule Greenhouse.Web.AuthAndTenantRoutesTest do
     assert reboot_data["status"]["b"] != first_b
     assert reboot_data["latest_telemetry"]["b"] == reboot_data["status"]["b"]
     assert reboot_data["latest_telemetry"]["seq"] == 0
+
+    sim_err_gh1 =
+      Router.call(conn(:post, "/api/v1/devices/GH-0001/simulate", %{"scenario" => "normal"}))
+
+    assert sim_err_gh1.status == 400
+    assert JSON.decode!(sim_err_gh1.resp_body)["error"] == "not_simulated_device"
 
     sim_err =
       Router.call(conn(:post, "/api/v1/devices/GH-0002/simulate", %{"scenario" => "normal"}))
@@ -230,10 +236,10 @@ defmodule Greenhouse.Web.AuthAndTenantRoutesTest do
 
     assert cross_invalid_conn.status == 422
 
-    # Reset demo cleans up GH-0003 config cache and restores GH-0001
+    # Reset demo cleans up GH-0003 config cache and restores GH-0000
     reset_conn = Router.call(conn(:post, "/api/v1/dev/reset"))
     assert reset_conn.status == 200
     assert {:ok, %{raw: %{}}} = Storage.get_config("GH-0003")
-    assert {:ok, _} = Storage.get_device("GH-0001")
+    assert {:ok, _} = Storage.get_device("GH-0000")
   end
 end

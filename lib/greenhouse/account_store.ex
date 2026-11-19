@@ -1,7 +1,7 @@
 defmodule Greenhouse.AccountStore do
   @moduledoc """
   GenServer managing multi-tenant user accounts, bearer session tokens, exclusive
-  device bindings, single reserved simulation device (`GH-0001`), and snapshot assembly
+  device bindings, single reserved simulation device (`GH-0000`), and snapshot assembly
   backed by ETS + optional DETS persistence.
 
   Delegates domain logic to `Greenhouse.AccountStore.Auth`,
@@ -66,13 +66,13 @@ defmodule Greenhouse.AccountStore do
   # --- Public Helpers ---
 
   @doc """
-  Returns the sole device ID reserved for local telemetry/alarm simulation (`"GH-0001"`).
+  Returns the sole device ID reserved for local telemetry/alarm simulation (`"GH-0000"`).
   """
   @spec simulated_device_id() :: Greenhouse.device_id()
   defdelegate simulated_device_id(), to: Simulator
 
   @doc """
-  Returns `true` if `device_id` matches the sole reserved simulated device (`"GH-0001"`).
+  Returns `true` if `device_id` matches the sole reserved simulated device (`"GH-0000"`).
   """
   @spec simulated_device?(term()) :: boolean()
   defdelegate simulated_device?(device_id), to: Simulator
@@ -211,7 +211,7 @@ defmodule Greenhouse.AccountStore do
   defdelegate build_user_device_snapshot(binding), to: Bindings
 
   @doc """
-  Triggers a simulated scenario on the sole reserved simulated device (`GH-0001`).
+  Triggers a simulated scenario on the sole reserved simulated device (`GH-0000`).
   Returns `{:error, 400, "not_simulated_device", ...}` for all other device IDs.
   """
   @spec simulate_scenario(term(), term()) :: {:ok, user_device_snapshot()} | api_error()
