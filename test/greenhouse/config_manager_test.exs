@@ -135,4 +135,121 @@ defmodule Greenhouse.ConfigManagerTest do
 
     assert {:ok, %{raw: %{"tMin" => 1600}}} = Storage.get_config("GH-ACK")
   end
+
+  test "splits oversized full-config patches into cross-field-coherent small chunks sequentially" do
+    test_pid = self()
+
+    {:ok, cm} =
+      ConfigManager.start_link(
+        name: nil,
+        publish_fn: fn topic, payload, opts ->
+          send(test_pid, {:published, topic, payload, opts})
+          :ok
+        end,
+        config_ack_timeout_ms: 500
+      )
+
+    on_exit(fn -> Helpers.stop_safely(cm) end)
+
+    full_patch = %{
+      "tMin" => 2000,
+      "tMax" => 3200,
+      "tHys" => 200,
+      "ahMin" => 4500,
+      "ahMax" => 7000,
+      "ahHys" => 300,
+      "shMin" => 3500,
+      "shMax" => 6500,
+      "luxMin" => 800,
+      "luxMax" => 35_000,
+      "luxOnMs" => 3_600_000,
+      "dayStartMs" => 19_800_000,
+      "dayLenMs" => 50_400_000,
+      "pumpMs" => 8000,
+      "pumpIntervalMs" => 240_000,
+      "pumpMaxPerDay" => 6,
+      "sampleMs" => 3000,
+      "turnPerDay" => 45,
+      "turnMax" => 180,
+      "turnStep" => 15,
+      "turnIntervalMs" => 20_000
+    }
+
+    task = Task.async(fn -> ConfigManager.apply_config(cm, "GH-FULL", full_patch) end)
+
+    chunks =
+      Enum.reduce_while(1..10, [], fn _i, acc ->
+        receive do
+          {:published, "gh/GH-FULL/config", payload, [qos: 1, retain: false]} ->
+            assert byte_size(payload) <= 128
+            decoded = JSON.decode!(payload)
+            assert map_size(decoded) in 1..6
+            :ok = ConfigManager.handle_ack(cm, "GH-FULL", %{"ok" => true})
+
+            acc = [decoded | acc]
+            merged_keys = acc |> Enum.reduce(%{}, &Map.merge(&2, &1)) |> map_size()
+
+            if merged_keys == map_size(full_patch) do
+              {:halt, Enum.reverse(acc)}
+            else
+              {:cont, acc}
+            end
+        after
+          500 -> flunk("expected next config chunk publish, got #{length(acc)} chunks so far")
+        end
+      end)
+
+    assert length(chunks) == 4
+    assert {:ok, updated} = Task.await(task, 1_000)
+    assert updated.raw == full_patch
+
+    # Coupled temperature fields stay together in the first chunk
+    first = Enum.at(chunks, 0)
+    assert Map.has_key?(first, "tMin")
+    assert Map.has_key?(first, "tMax")
+    assert Map.has_key?(first, "tHys")
+  end
+
+  test "stops chunked config publish immediately when an intermediate chunk is rejected" do
+    test_pid = self()
+
+    {:ok, cm} =
+      ConfigManager.start_link(
+        name: nil,
+        publish_fn: fn topic, payload, _opts ->
+          send(test_pid, {:published, topic, payload})
+          :ok
+        end,
+        config_ack_timeout_ms: 500
+      )
+
+    on_exit(fn -> Helpers.stop_safely(cm) end)
+
+    patch = %{
+      "tMin" => 2000,
+      "tMax" => 3200,
+      "tHys" => 200,
+      "ahMin" => 4500,
+      "ahMax" => 7000,
+      "ahHys" => 300,
+      "luxMin" => 800,
+      "luxMax" => 35_000,
+      "dayStartMs" => 19_800_000,
+      "dayLenMs" => 50_400_000
+    }
+
+    task = Task.async(fn -> ConfigManager.apply_config(cm, "GH-PARTIAL", patch) end)
+
+    assert_receive {:published, "gh/GH-PARTIAL/config", payload1}, 500
+    chunk1 = JSON.decode!(payload1)
+    :ok = ConfigManager.handle_ack(cm, "GH-PARTIAL", %{"ok" => true})
+
+    assert_receive {:published, "gh/GH-PARTIAL/config", _payload2}, 500
+    :ok = ConfigManager.handle_ack(cm, "GH-PARTIAL", %{"ok" => false, "reason" => "rejected"})
+
+    assert {:error, {:device_rejected, "rejected"}} = Task.await(task, 1_000)
+    refute_received {:published, "gh/GH-PARTIAL/config", _}
+
+    assert {:ok, %{raw: ^chunk1}} = Storage.get_config("GH-PARTIAL")
+  end
 end

@@ -19,7 +19,7 @@ config :greenhouse, Greenhouse.Storage,
 config :greenhouse, Greenhouse.AccountStore,
   persist: true,
   data_dir: "priv/data",
-  seed_demo: true
+  seed_demo: false
 
 config :greenhouse, Greenhouse.ConfigManager, config_ack_timeout_ms: 10_000
 

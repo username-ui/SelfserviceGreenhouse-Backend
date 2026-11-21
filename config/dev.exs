@@ -11,6 +11,6 @@ config :greenhouse, Greenhouse.Storage,
 config :greenhouse, Greenhouse.AccountStore,
   persist: true,
   data_dir: "priv/data",
-  seed_demo: true
+  seed_demo: false
 
 config :logger, level: :info

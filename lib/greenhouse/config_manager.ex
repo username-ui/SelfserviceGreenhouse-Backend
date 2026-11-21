@@ -8,7 +8,19 @@ defmodule Greenhouse.ConfigManager do
   require Logger
 
   @default_ack_timeout_ms 10_000
+  @default_max_chunk_keys 6
+  @default_max_chunk_bytes 128
   @hibernate_after_ms 15_000
+
+  @atomic_key_groups [
+    ["tMin", "tMax", "tHys"],
+    ["ahMin", "ahMax", "ahHys"],
+    ["shMin", "shMax", "sampleMs"],
+    ["luxMin", "luxMax"],
+    ["luxOnMs", "dayStartMs", "dayLenMs"],
+    ["pumpMs", "pumpIntervalMs", "pumpMaxPerDay"],
+    ["turnPerDay", "turnMax", "turnStep", "turnIntervalMs"]
+  ]
 
   @typedoc "GenServer reference for `ConfigManager`."
   @type server :: GenServer.server()
@@ -27,6 +39,8 @@ defmodule Greenhouse.ConfigManager do
           {:name, GenServer.name() | nil}
           | {:publish_fn, publish_fn()}
           | {:config_ack_timeout_ms, pos_integer()}
+          | {:max_chunk_keys, pos_integer()}
+          | {:max_chunk_bytes, pos_integer()}
           | {:storage_mod, module()}
           | {:hibernate_after_ms, pos_integer()}
 
@@ -35,7 +49,9 @@ defmodule Greenhouse.ConfigManager do
           from: GenServer.from(),
           ref: reference(),
           timer_ref: reference(),
-          wire_patch: Greenhouse.ConfigValidator.wire_patch()
+          wire_patch: Greenhouse.ConfigValidator.wire_patch(),
+          remaining_chunks: [Greenhouse.ConfigValidator.wire_patch()],
+          timeout_ms: pos_integer()
         }
 
   @typedoc "Result returned by `apply_config/2,3,4`."
@@ -48,12 +64,28 @@ defmodule Greenhouse.ConfigManager do
              | :mqtt_disconnected
              | :config_in_progress}
 
-  @enforce_keys [:config_ack_timeout_ms, :publish_fn, :storage_mod, :waiters]
-  defstruct [:config_ack_timeout_ms, :publish_fn, :storage_mod, :waiters]
+  @enforce_keys [
+    :config_ack_timeout_ms,
+    :max_chunk_keys,
+    :max_chunk_bytes,
+    :publish_fn,
+    :storage_mod,
+    :waiters
+  ]
+  defstruct [
+    :config_ack_timeout_ms,
+    :max_chunk_keys,
+    :max_chunk_bytes,
+    :publish_fn,
+    :storage_mod,
+    :waiters
+  ]
 
   @typedoc "Internal GenServer state struct for `Greenhouse.ConfigManager`."
   @type state :: %__MODULE__{
           config_ack_timeout_ms: pos_integer(),
+          max_chunk_keys: pos_integer(),
+          max_chunk_bytes: pos_integer(),
           publish_fn: publish_fn(),
           storage_mod: module(),
           waiters: %{optional(Greenhouse.device_id()) => waiter()}
@@ -162,6 +194,18 @@ defmodule Greenhouse.ConfigManager do
 
     state = %__MODULE__{
       config_ack_timeout_ms: timeout_ms,
+      max_chunk_keys:
+        Keyword.get(
+          opts,
+          :max_chunk_keys,
+          Keyword.get(app_cfg, :max_chunk_keys, @default_max_chunk_keys)
+        ),
+      max_chunk_bytes:
+        Keyword.get(
+          opts,
+          :max_chunk_bytes,
+          Keyword.get(app_cfg, :max_chunk_bytes, @default_max_chunk_bytes)
+        ),
       publish_fn: Keyword.get(opts, :publish_fn, &Greenhouse.MQTT.Client.publish/3),
       storage_mod: Keyword.get(opts, :storage_mod, Greenhouse.Storage),
       waiters: %{}
@@ -258,26 +302,16 @@ defmodule Greenhouse.ConfigManager do
         {:reply, {:error, {:validation_failed, errors}}, state}
 
       {:ok, wire_patch} ->
-        topic = "gh/#{device_id}/config"
-        payload = JSON.encode!(wire_patch)
+        timeout_ms = Keyword.get(opts, :timeout, state.config_ack_timeout_ms)
 
-        case safe_publish(state.publish_fn, topic, payload) do
-          :ok ->
-            timeout_ms = Keyword.get(opts, :timeout, state.config_ack_timeout_ms)
-            ref = make_ref()
-            timer_ref = Process.send_after(self(), {:ack_timeout, device_id, ref}, timeout_ms)
+        [first_chunk | remaining_chunks] =
+          split_wire_patch(wire_patch, state.max_chunk_keys, state.max_chunk_bytes)
 
-            waiter = %{
-              from: from,
-              ref: ref,
-              timer_ref: timer_ref,
-              wire_patch: wire_patch
-            }
+        case publish_chunk(device_id, first_chunk, remaining_chunks, timeout_ms, from, state) do
+          {:ok, new_state} ->
+            {:noreply, new_state}
 
-            {:noreply, %{state | waiters: Map.put(state.waiters, device_id, waiter)}}
-
-          {:error, reason} ->
-            Logger.warning("Failed to publish config to #{topic}: #{inspect(reason)}")
+          {:error, :mqtt_disconnected} ->
             {:reply, {:error, :mqtt_disconnected}, state}
         end
     end
@@ -303,8 +337,28 @@ defmodule Greenhouse.ConfigManager do
     {:ok, updated_config} =
       update_config_cache(state.storage_mod, device_id, waiter.wire_patch, received_at_ms)
 
-    GenServer.reply(waiter.from, {:ok, updated_config})
-    %{state | waiters: Map.delete(state.waiters, device_id)}
+    case waiter.remaining_chunks do
+      [] ->
+        GenServer.reply(waiter.from, {:ok, updated_config})
+        %{state | waiters: Map.delete(state.waiters, device_id)}
+
+      [next_chunk | rest_chunks] ->
+        case publish_chunk(
+               device_id,
+               next_chunk,
+               rest_chunks,
+               waiter.timeout_ms,
+               waiter.from,
+               state
+             ) do
+          {:ok, new_state} ->
+            new_state
+
+          {:error, :mqtt_disconnected} ->
+            GenServer.reply(waiter.from, {:error, :mqtt_disconnected})
+            %{state | waiters: Map.delete(state.waiters, device_id)}
+        end
+    end
   end
 
   defp resolve_waiter(
@@ -376,6 +430,118 @@ defmodule Greenhouse.ConfigManager do
   defp fetch_current_raw(storage_mod, device_id)
        when is_atom(storage_mod) and is_binary(device_id) do
     Greenhouse.Support.fetch_raw_config(storage_mod, device_id)
+  end
+
+  @spec publish_chunk(
+          Greenhouse.device_id(),
+          Greenhouse.ConfigValidator.wire_patch(),
+          [Greenhouse.ConfigValidator.wire_patch()],
+          pos_integer(),
+          GenServer.from(),
+          state()
+        ) :: {:ok, state()} | {:error, :mqtt_disconnected}
+  defp publish_chunk(
+         device_id,
+         chunk_patch,
+         remaining_chunks,
+         timeout_ms,
+         from,
+         %__MODULE__{} = state
+       )
+       when is_binary(device_id) and is_map(chunk_patch) and is_list(remaining_chunks) and
+              is_integer(timeout_ms) and timeout_ms > 0 do
+    topic = "gh/#{device_id}/config"
+    payload = JSON.encode!(chunk_patch)
+
+    case safe_publish(state.publish_fn, topic, payload) do
+      :ok ->
+        ref = make_ref()
+        timer_ref = Process.send_after(self(), {:ack_timeout, device_id, ref}, timeout_ms)
+
+        waiter = %{
+          from: from,
+          ref: ref,
+          timer_ref: timer_ref,
+          wire_patch: chunk_patch,
+          remaining_chunks: remaining_chunks,
+          timeout_ms: timeout_ms
+        }
+
+        {:ok, %{state | waiters: Map.put(state.waiters, device_id, waiter)}}
+
+      {:error, reason} ->
+        Logger.warning("Failed to publish config to #{topic}: #{inspect(reason)}")
+        {:error, :mqtt_disconnected}
+    end
+  end
+
+  @spec split_wire_patch(
+          Greenhouse.ConfigValidator.wire_patch(),
+          pos_integer(),
+          pos_integer()
+        ) :: nonempty_list(Greenhouse.ConfigValidator.wire_patch())
+  defp split_wire_patch(wire_patch, max_keys, max_bytes)
+       when is_map(wire_patch) and is_integer(max_keys) and max_keys > 0 and
+              is_integer(max_bytes) and max_bytes > 0 do
+    if map_size(wire_patch) <= max_keys and byte_size(JSON.encode!(wire_patch)) <= max_bytes do
+      [wire_patch]
+    else
+      groups = extract_atomic_groups(wire_patch)
+      pack_atomic_groups(groups, max_keys, max_bytes)
+    end
+  end
+
+  @spec extract_atomic_groups(Greenhouse.ConfigValidator.wire_patch()) ::
+          nonempty_list(Greenhouse.ConfigValidator.wire_patch())
+  defp extract_atomic_groups(wire_patch) when is_map(wire_patch) do
+    {groups_rev, remaining} =
+      Enum.reduce(@atomic_key_groups, {[], wire_patch}, fn keys, {acc, rem_map} ->
+        submap = Map.take(rem_map, keys)
+
+        if map_size(submap) == 0 do
+          {acc, rem_map}
+        else
+          {[submap | acc], Map.drop(rem_map, keys)}
+        end
+      end)
+
+    groups_rev =
+      if map_size(remaining) == 0 do
+        groups_rev
+      else
+        extra_singles =
+          remaining
+          |> Enum.sort_by(fn {k, _v} -> k end)
+          |> Enum.map(fn {k, v} -> %{k => v} end)
+
+        Enum.reverse(extra_singles) ++ groups_rev
+      end
+
+    case Enum.reverse(groups_rev) do
+      [] -> [wire_patch]
+      non_empty -> non_empty
+    end
+  end
+
+  @spec pack_atomic_groups(
+          nonempty_list(Greenhouse.ConfigValidator.wire_patch()),
+          pos_integer(),
+          pos_integer()
+        ) :: nonempty_list(Greenhouse.ConfigValidator.wire_patch())
+  defp pack_atomic_groups([first | rest], max_keys, max_bytes)
+       when is_map(first) and is_integer(max_keys) and is_integer(max_bytes) do
+    {chunks_rev, last} =
+      Enum.reduce(rest, {[], first}, fn group, {acc, current} ->
+        merged = Map.merge(current, group)
+
+        if map_size(merged) <= max_keys and byte_size(JSON.encode!(merged)) <= max_bytes do
+          {acc, merged}
+        else
+          {[current | acc], group}
+        end
+      end)
+
+    Enum.reverse([last | chunks_rev])
   end
 
   @spec safe_publish(publish_fn(), String.t(), binary()) :: :ok | {:error, term()}
